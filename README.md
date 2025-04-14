@@ -8,7 +8,23 @@ A simple client-server request-response program implemented using RDMA.
 
 The purpose of this program to get used to the commonly used RDMA verbs and RDMA CM
 APIs. This repository gives a simple skeleton or husk of a scalable RPC application that
-needs RDMA as its transport.
+needs RDMA as its transport. The following concepts are being exercises in this example
+program -
+1. Asynchronous RDMA CM APIs (in the server)
+2. Synchronous RDMA CM APIs (in the client)
+3. Generic control path RDMA verb APIS
+   1. Protection Domains
+   2. Memory Regions
+   3. Completion Queues
+   4. Completion Channels (for blocking/cpu-efficient datapath in the client)
+   5. Queue Pairs
+   6. Shared Receive Queues (for scalable and memory-efficient server)
+4. Generic data path RDMA verbs APIs
+   1. Posting RECV Work Requests
+   2. Posting SEND Work Requests
+   3. Polling the Completion Queues
+   4. Blocking on the Completion Channels
+   5. Using bounded blocking on the Completion Channels using epoll
 
 ## Prereqs
 
