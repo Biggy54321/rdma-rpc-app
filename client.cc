@@ -17,6 +17,8 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <getopt.h>
+#include <mutex>
+#include <condition_variable>
 
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
@@ -60,6 +62,36 @@ struct ClientState {
 };
 
 
+// Barrier to synchronize the client threads local to this machine
+class Barrier {
+public:
+    explicit Barrier(size_t count)
+        : thread_count(count), waiting(0), generation(0) {}
+
+    void wait() {
+        std::unique_lock<std::mutex> lock(mtx);
+        size_t gen = generation;
+
+        if (++waiting == thread_count) {
+            // All threads have arrived, reset the counter and proceed
+            waiting = 0;
+            generation++;
+            cv.notify_all();
+        } else {
+            // Wait for all threads to reach the barrier
+            cv.wait(lock, [this, gen] { return gen != generation; });
+        }
+    }
+
+private:
+    size_t thread_count; // Number of threads to wait for
+    size_t waiting;      // Number of threads currently waiting
+    size_t generation;   // Barrier generation to handle multiple phases
+    std::mutex mtx;
+    std::condition_variable cv;
+} *barrier;
+
+
 void clientProcessWorkUnitsSync(ClientState *clnt,
                                 std::vector<WorkUnit> &work_units,
                                 int id) {
@@ -71,6 +103,8 @@ void clientProcessWorkUnitsSync(ClientState *clnt,
     struct ibv_send_wr *bad_swr;
     struct ibv_sge sge;
     struct ibv_wc wc;
+
+    barrier->wait();
 
     for (int i = 0; i < work_units.size(); i++) {
 
@@ -105,6 +139,8 @@ void clientProcessWorkUnitsSync(ClientState *clnt,
         while (ibv_poll_cq(clnt->rcq, 1, &wc) <= 0);
         assert(wc.wr_id == i);
     }
+
+    barrier->wait();
 }
 
 void clientProcessWorkUnitsAsync(ClientState *clnt,
@@ -228,6 +264,8 @@ void clientProcessWorkUnitsAsync(ClientState *clnt,
 
     int active_swrs = 0;
 
+    barrier->wait();
+
     // Main client thread generates load
     for (int i = 0; i < work_units.size(); i++) {
 
@@ -277,6 +315,8 @@ void clientProcessWorkUnitsAsync(ClientState *clnt,
     async_reader.join();
 
     ibv_dereg_mr(mr);
+
+    barrier->wait();
 }
 
 
@@ -425,6 +465,8 @@ void clientLoop(int id) {
 
 
 int main(int argc, char *argv[]) {
+
+    barrier = new Barrier(NB_THREADS);
 
     std::vector<std::thread> clients;
 
