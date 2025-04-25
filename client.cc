@@ -29,7 +29,7 @@
 #define SERVER_PORT (40000)
 #define NB_THREADS (64)
 #define NB_WORK_UNITS (1000000)
-#define DO_CLOSED_LOOP (1)
+#define DO_CLOSED_LOOP (0)
 #define BLOCKING_SENDER (0)
 
 // Request structure
@@ -59,6 +59,10 @@ struct ClientState {
     struct ibv_comp_channel *rcomp;
     struct ibv_cq *rcq;
     std::vector<WorkUnit> work_units;
+    struct {
+        uint64_t nb_reqs;
+        uint64_t duration;
+    } stats;
 };
 
 
@@ -105,6 +109,8 @@ void clientProcessWorkUnitsSync(ClientState *clnt,
 
     barrier->wait();
 
+    auto start_time = std::chrono::steady_clock::now();
+
     for (int i = 0; i < work_units.size(); i++) {
 
         // Prepare the response memory
@@ -137,7 +143,14 @@ void clientProcessWorkUnitsSync(ClientState *clnt,
         // Wait for the response to be received
         while (ibv_poll_cq(clnt->rcq, 1, &wc) <= 0);
         assert(wc.wr_id == i);
+
+        // Update stats
+        clnt->stats.nb_reqs++;
     }
+
+    auto end_time = std::chrono::steady_clock::now();
+    clnt->stats.duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        end_time - start_time).count();
 
     barrier->wait();
 }
@@ -240,6 +253,7 @@ void clientProcessWorkUnitsAsync(ClientState *clnt,
                     work_units[resp.id].resp = resp;
 
                     nproc++;
+                    clnt->stats.nb_reqs++;
 
                     // Post a new receive work request
                     rsge.addr = (uint64_t)&resps[rwc[i].wr_id];
@@ -263,6 +277,8 @@ void clientProcessWorkUnitsAsync(ClientState *clnt,
     int active_swrs = 0;
 
     barrier->wait();
+
+    auto start_time = std::chrono::steady_clock::now();
 
     // Main client thread generates load
     for (int i = 0; i < work_units.size(); i++) {
@@ -311,6 +327,10 @@ void clientProcessWorkUnitsAsync(ClientState *clnt,
 
     // Stop the async thread
     async_reader.join();
+
+    auto end_time = std::chrono::steady_clock::now();
+    clnt->stats.duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        end_time - start_time).count();
 
     ibv_dereg_mr(mr);
 
@@ -464,7 +484,6 @@ void clientLoop(ClientState *clnt) {
 int main(int argc, char *argv[]) {
 
     barrier = new Barrier(NB_THREADS);
-
     std::vector<ClientState> clients(NB_THREADS);
 
     // Create the client threads
@@ -477,6 +496,14 @@ int main(int argc, char *argv[]) {
     for (auto &client : clients) {
         client.td.join();
     }
+
+    // Print the statistics
+    double tot_tput;
+    for (int i = 0; i < NB_THREADS; i++) {
+        double clnt_tput = (double)clients[i].stats.nb_reqs / clients[i].stats.duration;
+        tot_tput += clnt_tput;
+    }
+    std::cout << "Throughput: " << tot_tput << " Million Requests Per Second" << std::endl;
 
     return 0;
 }
