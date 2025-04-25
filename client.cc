@@ -27,9 +27,9 @@
 
 #define SERVER_ADDR "192.168.1.6"
 #define SERVER_PORT (40000)
-#define NB_THREADS (8)
+#define NB_THREADS (64)
 #define NB_WORK_UNITS (1000000)
-#define DO_CLOSED_LOOP (0)
+#define DO_CLOSED_LOOP (1)
 #define BLOCKING_SENDER (0)
 
 // Request structure
@@ -93,8 +93,7 @@ private:
 
 
 void clientProcessWorkUnitsSync(ClientState *clnt,
-                                std::vector<WorkUnit> &work_units,
-                                int id) {
+                                std::vector<WorkUnit> &work_units) {
 
     int status;
     struct ibv_recv_wr rwr = {0};
@@ -144,8 +143,7 @@ void clientProcessWorkUnitsSync(ClientState *clnt,
 }
 
 void clientProcessWorkUnitsAsync(ClientState *clnt,
-                                 std::vector<WorkUnit> &work_units,
-                                 int id) {
+                                 std::vector<WorkUnit> &work_units) {
 
     int status;
     struct ibv_recv_wr rwr = {0};
@@ -321,7 +319,7 @@ void clientProcessWorkUnitsAsync(ClientState *clnt,
 
 
 // Client load generation loop
-void clientLoop(int id) {
+void clientLoop(ClientState *clnt) {
 
     int status;
     struct rdma_event_channel *ec;
@@ -330,7 +328,6 @@ void clientLoop(int id) {
     struct ibv_device_attr dev_attr;
     struct ibv_qp_init_attr qp_init_attr;
     struct rdma_conn_param conn_param;
-    ClientState clnt;
     std::vector<WorkUnit> work_units;
 
     // Create the event channel
@@ -338,14 +335,14 @@ void clientLoop(int id) {
     assert(ec);
 
     // Create the rdma socket
-    status = rdma_create_id(ec, &clnt.id, NULL, RDMA_PS_TCP);
+    status = rdma_create_id(ec, &clnt->id, NULL, RDMA_PS_TCP);
     assert(!status);
 
     // Bind to an RDMA device
     addr.sin_family = AF_INET;
     addr.sin_port = htons(SERVER_PORT);
     inet_pton(AF_INET, SERVER_ADDR, &addr.sin_addr);
-    status = rdma_resolve_addr(clnt.id, NULL, (struct sockaddr *)&addr, 10000);
+    status = rdma_resolve_addr(clnt->id, NULL, (struct sockaddr *)&addr, 10000);
     assert(!status);
 
     // Wait for the address resolution
@@ -356,12 +353,12 @@ void clientLoop(int id) {
     assert(!status);
 
     // Get the device attributes
-    status = ibv_query_device(clnt.id->verbs, &dev_attr);
+    status = ibv_query_device(clnt->id->verbs, &dev_attr);
     assert(!status);
 
     // Create a protection domain
-    clnt.pd = ibv_alloc_pd(clnt.id->verbs);
-    assert(clnt.pd);
+    clnt->pd = ibv_alloc_pd(clnt->id->verbs);
+    assert(clnt->pd);
 
     // Create the memory region
     work_units.resize(NB_WORK_UNITS);
@@ -369,45 +366,45 @@ void clientLoop(int id) {
         work_units[i].req.id = i;
         work_units[i].resp.id = 0;
     }
-    clnt.mr = ibv_reg_mr(clnt.pd,
+    clnt->mr = ibv_reg_mr(clnt->pd,
                          (void *)work_units.data(),
                          work_units.size() * sizeof(WorkUnit),
                          IBV_ACCESS_LOCAL_WRITE |
                          IBV_ACCESS_REMOTE_READ |
                          IBV_ACCESS_REMOTE_READ);
-    assert(clnt.mr);
+    assert(clnt->mr);
 
     // Create the send completion queue
-    clnt.scomp = ibv_create_comp_channel(clnt.id->verbs);
-    assert(clnt.scomp);
-    clnt.scq = ibv_create_cq(clnt.id->verbs, dev_attr.max_cqe, NULL, clnt.scomp, 0);
-    assert(clnt.scq);
-    status = ibv_req_notify_cq(clnt.scq, 0);
+    clnt->scomp = ibv_create_comp_channel(clnt->id->verbs);
+    assert(clnt->scomp);
+    clnt->scq = ibv_create_cq(clnt->id->verbs, dev_attr.max_cqe, NULL, clnt->scomp, 0);
+    assert(clnt->scq);
+    status = ibv_req_notify_cq(clnt->scq, 0);
     assert(!status);
 
     // Create receive send completion queue
-    clnt.rcomp = ibv_create_comp_channel(clnt.id->verbs);
-    assert(clnt.rcomp);
-    clnt.rcq = ibv_create_cq(clnt.id->verbs, dev_attr.max_cqe, NULL, clnt.rcomp, 0);
-    assert(clnt.rcq);
-    status = ibv_req_notify_cq(clnt.rcq, 0);
+    clnt->rcomp = ibv_create_comp_channel(clnt->id->verbs);
+    assert(clnt->rcomp);
+    clnt->rcq = ibv_create_cq(clnt->id->verbs, dev_attr.max_cqe, NULL, clnt->rcomp, 0);
+    assert(clnt->rcq);
+    status = ibv_req_notify_cq(clnt->rcq, 0);
     assert(!status);
 
     // Create the queue pair
     memset(&qp_init_attr, 0, sizeof(qp_init_attr));
-    qp_init_attr.send_cq = clnt.scq;
-    qp_init_attr.recv_cq = clnt.rcq;
+    qp_init_attr.send_cq = clnt->scq;
+    qp_init_attr.recv_cq = clnt->rcq;
     qp_init_attr.qp_type = IBV_QPT_RC;
     qp_init_attr.sq_sig_all = 1;
     qp_init_attr.cap.max_send_wr = 128;
     qp_init_attr.cap.max_recv_wr = 128;
     qp_init_attr.cap.max_send_sge = dev_attr.max_sge;
     qp_init_attr.cap.max_recv_sge = dev_attr.max_sge;
-    status = rdma_create_qp(clnt.id, clnt.pd, &qp_init_attr);
+    status = rdma_create_qp(clnt->id, clnt->pd, &qp_init_attr);
     assert(!status);
 
     // Resolve the route to the remote address
-    status = rdma_resolve_route(clnt.id, 10000);
+    status = rdma_resolve_route(clnt->id, 10000);
     assert(!status);
 
     // Wait for the route resolution
@@ -419,7 +416,7 @@ void clientLoop(int id) {
 
     // Connect with the remote
     memset(&conn_param, 0, sizeof(conn_param));
-    status = rdma_connect(clnt.id, &conn_param);
+    status = rdma_connect(clnt->id, &conn_param);
 
     // Wait for the connection
     status = rdma_get_cm_event(ec, &ev);
@@ -430,9 +427,9 @@ void clientLoop(int id) {
 
     // Perform the work
 #if (DO_CLOSED_LOOP == 1)
-    clientProcessWorkUnitsSync(&clnt, work_units, id);
+    clientProcessWorkUnitsSync(clnt, work_units);
 #else
-    clientProcessWorkUnitsAsync(&clnt, work_units, id);
+    clientProcessWorkUnitsAsync(clnt, work_units);
 #endif
 
     // Verify the work was successfull
@@ -441,7 +438,7 @@ void clientLoop(int id) {
     }
 
     // Disconnect with the remote
-    status = rdma_disconnect(clnt.id);
+    status = rdma_disconnect(clnt->id);
     assert(!status);
 
     // Wait for the disconnection
@@ -452,14 +449,14 @@ void clientLoop(int id) {
     assert(!status);
 
     // Clean up
-    rdma_destroy_qp(clnt.id);
-    ibv_destroy_cq(clnt.rcq);
-    ibv_destroy_comp_channel(clnt.rcomp);
-    ibv_destroy_cq(clnt.scq);
-    ibv_destroy_comp_channel(clnt.scomp);
-    ibv_dereg_mr(clnt.mr);
-    ibv_dealloc_pd(clnt.pd);
-    rdma_destroy_id(clnt.id);
+    rdma_destroy_qp(clnt->id);
+    ibv_destroy_cq(clnt->rcq);
+    ibv_destroy_comp_channel(clnt->rcomp);
+    ibv_destroy_cq(clnt->scq);
+    ibv_destroy_comp_channel(clnt->scomp);
+    ibv_dereg_mr(clnt->mr);
+    ibv_dealloc_pd(clnt->pd);
+    rdma_destroy_id(clnt->id);
     rdma_destroy_event_channel(ec);
 }
 
@@ -468,17 +465,17 @@ int main(int argc, char *argv[]) {
 
     barrier = new Barrier(NB_THREADS);
 
-    std::vector<std::thread> clients;
+    std::vector<ClientState> clients(NB_THREADS);
 
     // Create the client threads
     for (int i = 0; i < NB_THREADS; i++) {
 
-        clients.emplace_back(clientLoop, i);
+        clients[i].td = std::thread(clientLoop, &clients[i]);
     }
 
     // Wait for the client threads
     for (auto &client : clients) {
-        client.join();
+        client.td.join();
     }
 
     return 0;
